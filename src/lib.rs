@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread::Builder;
 
-pub static EXIT : u8 = 483717;
-pub static OK : u8 = 849122;
+pub static EXIT : u8 = 123;
+pub static OK : u8 = 321;
+pub static DONE : u8 = 345;
 
 pub trait Queueable {
     fn execute(&self);
@@ -93,11 +94,16 @@ impl <T : std::marker::Send + Queueable> Queue <T> {
             let (tx, rx): (Sender<T>, Receiver<T>) = mpsc::channel();
             let (tx_stop, rx_stop) : (Sender<u8>, Receiver<u8>) = mpsc::channel();
 
+            let (tx_done, rx_done) : (Sender<u8>, Receiver<u8>) = mpsc::channel();
+            let (tx_party_thread, rx_party_thread) : (Sender<T>, Receiver<T>) = mpsc::channel();
+
             self.sender = Some(tx);
-            self.stop_sender = Some(tx_stop);
+            self.stop_sender = Some(tx_done.clone());
 
             let builder : Builder = thread::Builder::new();
 
+
+            let done = tx_done.clone();
 
             // Each thread will send its id via the channel
             self.thread = Some(builder.spawn(move || {
@@ -110,16 +116,52 @@ impl <T : std::marker::Send + Queueable> Queue <T> {
                         break
 
                     } else {
-
-                        let _re = rx.recv();
+                        let _re = rx_party_thread.recv();
                         if _re.is_ok() {
                             _re.unwrap().execute();
                         }
+
+                        done.send(DONE);
                     }
                 }
             0
 
         }).unwrap());
+
+        thread::spawn(move || {
+
+            let mut free_to_process = true;
+
+            loop {
+
+                let mut v : Vec<T> = Vec::new();
+
+                println!("Receiving ID");
+
+                let result = rx_done.recv().unwrap();
+
+                println!("Received: {}", result);
+
+                if result == EXIT {
+                    tx_stop.send(EXIT);
+                    break;
+
+                } else if result == DONE {
+                    free_to_process = true;
+
+                } else if result == OK {
+                    v.push(rx.recv().unwrap());
+                }
+
+                if result != EXIT && free_to_process && v.len() > 0 {
+                    println!("Sending on");
+                    tx_stop.send(OK);
+                    tx_party_thread.send(v.pop().unwrap());
+                    free_to_process = false;
+
+                }
+            }
+        });
 
     }
 
@@ -206,6 +248,31 @@ mod tests {
 
         let mut q  : Queue<Blah>= Queue::new();
         q.start();
+        q.send_task(Blah {});
+        q.stop();
+        assert_eq!(q.is_running(), false);
+        unsafe { assert!(TEST_BOOL); }
+    }
+
+    #[test]
+    fn test_adding_a_task_to_the_queue_one_after_another() {
+        struct Blah;
+        impl Queueable for Blah {
+            fn execute(&self) {
+                unsafe {
+                    TEST_BOOL = true;
+                }
+            }
+        };
+
+        let mut q  : Queue<Blah>= Queue::new();
+        q.start();
+        q.send_task(Blah {});
+        q.send_task(Blah {});
+        q.send_task(Blah {});
+        q.send_task(Blah {});
+        q.send_task(Blah {});
+        q.send_task(Blah {});
         q.send_task(Blah {});
         q.stop();
         assert_eq!(q.is_running(), false);
